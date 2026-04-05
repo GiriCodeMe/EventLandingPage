@@ -58,3 +58,32 @@ Before starting, the mentee picks ONE theme. Ask which they prefer:
 - App must start with `npm run dev`
 - Use placeholder content (fictional event) if the user doesn't specify real content
 - Keep code simple and readable
+
+---
+
+## Build Instructions (from project owner)
+
+Build the complete Event Landing Page as described:
+1. Create 6 sections: Hero (event name, date, location, Register button), About (event description), Program (4-5 schedule items with times), Speakers (3-4 cards with placeholder avatars, names, titles), FAQ (4-5 collapsible questions), and Registration (form with name, email, company fields).
+2. The "Register Now" button in Hero should smoothly scroll to the Registration section.
+3. FAQ items should expand/collapse on click.
+4. The registration form should validate required fields and show a "You're registered!" success message on submit (no backend needed).
+5. Make the page fully responsive — looks great on both desktop and mobile.
+
+| Theme | Description | Style |
+|-------|-------------|-------|
+| A — Tech Conference | Dark hero block with gradient, neon accents | Modern and techy |
+| B — Corporate Event | EPAM blue, clean white sections | Professional and corporate |
+| C — Community Meetup | Warm orange tones, rounded corners | Friendly and informal |
+
+Before you start, ask the user which UI theme they want (A, B, or C). Then build everything in one go. Make sure the app runs with `npm run dev`.
+
+## Non-Functional Mandates
+
+- Page must render without errors at `npm run dev`
+- All 6 sections must be present and visible
+- Registration form must validate required fields before submission
+- FAQ accordion must open/collapse correctly (one item at a time)
+- Page must be responsive on mobile (≤768px) and desktop
+- All colours must meet WCAG 2.1 AA contrast ratio (≥4.5:1 for normal text)
+- No backend calls — all interactions are client-side only
