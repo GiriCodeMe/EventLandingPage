@@ -1,0 +1,312 @@
+name: CI — Quality Gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality-gates:
+    name: Build & Quality Gates
+    runs-on: ubuntu-latest
+    outputs:
+      build_outcome: ${{ steps.build.outcome }}
+      vuln_outcome:  ${{ steps.vuln-check.outcome }}
+
+    steps:
+      # ── Setup ─────────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ── Gate 1: Build ──────────────────────────────────────────────────────────
+      - name: Build
+        id: build
+        continue-on-error: true
+        run: npm run build
+
+      # ── Gate 2: Unit Tests + Coverage ─────────────────────────────────────────
+      - name: Unit Tests & Coverage
+        id: unit-tests
+        continue-on-error: true
+        run: |
+          npm run test:coverage 2>&1 | tee /tmp/unit-test-output.txt
+          exit ${PIPESTATUS[0]}
+
+      - name: Upload Coverage Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: ignore
+
+      - name: Upload Unit Test Results (vitest JSON)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-unit
+          path: test-results/vitest-results.json
+          if-no-files-found: ignore
+
+      # ── Gate 3: E2E Tests (Playwright) ────────────────────────────────────────
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: E2E Tests (Playwright)
+        id: e2e-tests
+        continue-on-error: true
+        run: |
+          npm run test:e2e 2>&1 | tee /tmp/e2e-output.txt
+          exit ${PIPESTATUS[0]}
+
+      - name: Upload Playwright Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          if-no-files-found: ignore
+
+      - name: Upload E2E Test Results (playwright JSON)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-e2e
+          path: test-results/playwright-results.json
+          if-no-files-found: ignore
+
+      # ── Gate 4: Accessibility — WCAG 2.1 AA ───────────────────────────────────
+      - name: Accessibility Tests (WCAG 2.1 AA)
+        id: a11y
+        continue-on-error: true
+        run: |
+          npm run test:a11y 2>&1 | tee /tmp/a11y-output.txt
+          exit ${PIPESTATUS[0]}
+
+      - name: Upload A11y Test Results (JSON)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-a11y
+          path: test-results/a11y-results.json
+          if-no-files-found: ignore
+
+      # ── Gate 5: Vulnerability Check ────────────────────────────────────────────
+      - name: Library Audit
+        id: lib-audit
+        continue-on-error: true
+        run: npm audit || true
+
+      - name: Vulnerability Check — npm audit (fail on moderate+)
+        id: vuln-check
+        continue-on-error: true
+        run: npm audit --audit-level=moderate
+
+      # ── Report: Go / No-Go Dashboard ──────────────────────────────────────────
+      - name: Generate Go/No-Go Report
+        if: always()
+        env:
+          BUILD:      ${{ steps.build.outcome }}
+          TESTS:      ${{ steps.unit-tests.outcome }}
+          E2E:        ${{ steps.e2e-tests.outcome }}
+          A11Y:       ${{ steps.a11y.outcome }}
+          LIB_AUDIT:  ${{ steps.lib-audit.outcome }}
+          VULN_CHECK: ${{ steps.vuln-check.outcome }}
+        run: |
+          icon()       { [ "$1" = "success" ] && echo "✅ Pass" || echo "❌ Fail"; }
+          strip_ansi() { sed 's/\x1B\[[0-9;]*[mGKHF]//g' "$1" 2>/dev/null || echo "Output not available"; }
+
+          PASS=true
+          for s in "$BUILD" "$TESTS" "$E2E" "$A11Y" "$LIB_AUDIT" "$VULN_CHECK"; do
+            [ "$s" != "success" ] && PASS=false
+          done
+
+          if [ "$PASS" = true ]; then
+            CONCLUSION="✅ **Go**"
+            CONCLUSION_TEXT="All quality gates passed. Safe to deploy."
+          else
+            CONCLUSION="❌ **No-Go**"
+            CONCLUSION_TEXT="One or more quality gates failed. Do not deploy."
+          fi
+
+          UNIT_SUMMARY=$(grep -E "^ *Tests " /tmp/unit-test-output.txt 2>/dev/null | tail -1 \
+            | sed 's/^ *//' | sed 's/\x1B\[[0-9;]*[mGKHF]//g' || echo "unavailable")
+          E2E_SUMMARY=$(grep -E "[0-9]+ (passed|failed)" /tmp/e2e-output.txt 2>/dev/null | tail -1 \
+            | sed 's/^ *//' | sed 's/\x1B\[[0-9;]*[mGKHF]//g' || echo "unavailable")
+          A11Y_SUMMARY=$(grep -E "[0-9]+ (passed|failed)" /tmp/a11y-output.txt 2>/dev/null | tail -1 \
+            | sed 's/^ *//' | sed 's/\x1B\[[0-9;]*[mGKHF]//g' || echo "unavailable")
+
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          # 📊 Build Quality Report — EPAM Tech Summit 2026
+
+          | Gate | Check | Status | Threshold |
+          |------|-------|--------|-----------|
+          | 1 | Build | $(icon $BUILD) | Compiles without errors |
+          | 2 | Unit Tests & Coverage | $(icon $TESTS) | 47/47 pass · stmts/fns/lines ≥ 80% · branches ≥ 75% |
+          | 3 | E2E Tests (Playwright) | $(icon $E2E) | All 19 behavioural tests pass |
+          | 4 | Accessibility — WCAG 2.1 AA | $(icon $A11Y) | 0 axe-core violations |
+          | 5 | Library Audit | $(icon $LIB_AUDIT) | All advisories reported |
+          | 6 | Vulnerability Check (npm audit) | $(icon $VULN_CHECK) | No moderate/high/critical vulnerabilities |
+
+          EOF
+
+          {
+            echo "<details>"
+            echo "<summary>🧪 Unit Test Results — ${UNIT_SUMMARY}</summary>"
+            echo ""
+            echo '```'
+            strip_ansi /tmp/unit-test-output.txt
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "<details>"
+            echo "<summary>🎭 E2E Test Results (Playwright) — ${E2E_SUMMARY}</summary>"
+            echo ""
+            echo '```'
+            strip_ansi /tmp/e2e-output.txt
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "<details>"
+            echo "<summary>♿ Accessibility Test Results (WCAG 2.1 AA) — ${A11Y_SUMMARY}</summary>"
+            echo ""
+            echo '```'
+            strip_ansi /tmp/a11y-output.txt
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+
+          ---
+
+          ## Conclusion: $CONCLUSION
+
+          > $CONCLUSION_TEXT
+          EOF
+
+      # ── Enforce: fail the job if any gate failed ───────────────────────────────
+      - name: Enforce Gates
+        if: always()
+        env:
+          BUILD:      ${{ steps.build.outcome }}
+          TESTS:      ${{ steps.unit-tests.outcome }}
+          E2E:        ${{ steps.e2e-tests.outcome }}
+          A11Y:       ${{ steps.a11y.outcome }}
+          LIB_AUDIT:  ${{ steps.lib-audit.outcome }}
+          VULN_CHECK: ${{ steps.vuln-check.outcome }}
+        run: |
+          FAILED=""
+          [ "$BUILD"      != "success" ] && FAILED="$FAILED\n  ❌ Build"
+          [ "$TESTS"      != "success" ] && FAILED="$FAILED\n  ❌ Unit Tests & Coverage"
+          [ "$E2E"        != "success" ] && FAILED="$FAILED\n  ❌ E2E Tests (Playwright)"
+          [ "$A11Y"       != "success" ] && FAILED="$FAILED\n  ❌ Accessibility — WCAG 2.1 AA"
+          [ "$LIB_AUDIT"  != "success" ] && FAILED="$FAILED\n  ❌ Library Audit"
+          [ "$VULN_CHECK" != "success" ] && FAILED="$FAILED\n  ❌ Vulnerability Check (moderate+ found)"
+
+          if [ -n "$FAILED" ]; then
+            echo "::error::No-Go — the following gates failed:$(printf "$FAILED")"
+            exit 1
+          fi
+
+          echo "All quality gates passed — Go ✅"
+
+  # ── Publish Metrics to ai-sdlc-dashboard ──────────────────────────────────────
+  publish-metrics:
+    name: Publish SDLC Metrics
+    needs: quality-gates
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout EventLandingPage
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download unit test results
+        uses: actions/download-artifact@v4
+        with:
+          name: test-results-unit
+          path: test-results/
+        continue-on-error: true
+
+      - name: Download E2E test results
+        uses: actions/download-artifact@v4
+        with:
+          name: test-results-e2e
+          path: test-results/
+        continue-on-error: true
+
+      - name: Download A11y test results
+        uses: actions/download-artifact@v4
+        with:
+          name: test-results-a11y
+          path: test-results/
+        continue-on-error: true
+
+      - name: Download unit coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+        continue-on-error: true
+
+      - name: Collect metrics
+        run: node scripts/collect-metrics.js
+        env:
+          GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GATE_BUILD:    ${{ needs.quality-gates.outputs.build_outcome }}
+          GATE_VULN:     ${{ needs.quality-gates.outputs.vuln_outcome }}
+
+      - name: Checkout ai-sdlc-dashboard
+        uses: actions/checkout@v4
+        with:
+          repository: GiriCodeMe/ai-sdlc-dashboard
+          token: ${{ secrets.SDLC_DASHBOARD_PAT }}
+          path: dashboard-repo
+
+      - name: Copy AIKPI metrics to dashboard repo
+        run: |
+          mkdir -p dashboard-repo/metrics/event-landing-page
+          cp metrics/AIKPI.json dashboard-repo/metrics/event-landing-page/AIKPI.json
+
+      - name: Commit and push metrics
+        working-directory: dashboard-repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add metrics/event-landing-page/AIKPI.json
+          git diff --staged --quiet && echo "No metrics change" && exit 0
+          git commit -m "chore: update event-landing-page AIKPI metrics [skip ci]"
+          git push
